@@ -4,6 +4,8 @@
 
 Spielbarer Prototyp: [`prototyp/index.html`](prototyp/index.html) (eine Datei, ohne Bibliothek, im Browser öffnen, am besten quer).
 
+> **Umgesetzt (19.11.2026):** Die Nahansicht ist jetzt im echten Spiel, Repo `lllkkkopa`, Pull Request #20 (zusammengeführt). Code `src/06b_close.js`, Beschreibung `doku/nahansicht.md`, Test `node test/nah.js`. Ab 7 Pixel pro Feld: Gebäudemodelle, Panzer nach dem Netz, feuernde Panzerreihen an Fronten, Krater, Sandsäcke, Wald und Gipfel. Unter der Rangliste neu das Wachstumstempo. Taste `J` schaltet aus. Abweichungen vom Plan unten: Bäume, Felsen und Gipfel sind dazugekommen, die Panzer stehen in Zügen pro Zelle statt einzeln, und von weiter weg werden nur die Züge an den Fronten gezeigt, damit es übersichtlich bleibt.
+
 ## Warum das hilft
 
 Heute ist alles Farbe und Zahl: Eine Stadt auf Stufe 80 sieht aus wie eine auf Stufe 1, 150K Truppen sind eine Zahl im Menü. Die Nahansicht gibt jeder Zahl einen Körper:
