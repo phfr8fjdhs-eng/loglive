@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Nahansicht: Aufbau und Krieg (Prototyp)</title>
+<style>
+  html,body{margin:0;height:100%;background:#0d1520;color:#e3ebf5;font:13px/1.3 system-ui,-apple-system,sans-serif;overflow:hidden;touch-action:manipulation;user-select:none;-webkit-user-select:none}
+  canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+  #top{position:absolute;left:0;right:0;top:0;padding:6px;display:grid;grid-template-columns:1fr 1fr;gap:6px;pointer-events:none}
+  .card{background:rgba(9,16,26,.84);border:1px solid rgba(255,255,255,.12);border-radius:10px;padding:5px 9px}
+  .card{min-width:0;overflow:hidden}
+  .card b{font-size:13px}
+  @media(max-width:480px){body{font-size:11px}.card b{font-size:11px}.card{padding:4px 6px}#msg{top:150px}}
+  .row{display:flex;justify-content:space-between;gap:6px;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .bar{height:5px;border-radius:3px;background:rgba(255,255,255,.12);margin-top:4px;overflow:hidden}
+  .bar i{display:block;height:100%}
+  #tempo{grid-column:1/3;text-align:center}
+  #tempo .split{display:flex;height:7px;border-radius:4px;overflow:hidden;margin-top:4px}
+  #msg{position:absolute;left:0;right:0;top:136px;text-align:center;pointer-events:none;font-weight:600;text-shadow:0 1px 3px #000}
+  #msg div{margin:2px auto;opacity:1;transition:opacity .6s}
+  #bot{position:absolute;left:0;right:0;bottom:0;padding:8px;display:flex;gap:8px;align-items:center;justify-content:center;flex-wrap:wrap;background:linear-gradient(transparent,rgba(5,9,15,.9))}
+  button{background:#1b2a3d;color:#e3ebf5;border:1px solid rgba(255,255,255,.18);border-radius:8px;padding:7px 11px;font:inherit}
+  button.on{background:#2f6fe0;border-color:#8bb4ff}
+  input[type=range]{width:120px}
+  #hint{width:100%;text-align:center;opacity:.7;font-size:12px}
+  #over{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(5,9,15,.7);font-size:28px;font-weight:700;text-align:center}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="top">
+  <div class="card" id="c0"></div>
+  <div class="card" id="c1"></div>
+  <div class="card" id="tempo"></div>
+</div>
+<div id="msg"></div>
+<div id="bot">
+  <span>Einsatz <b id="fv">40</b> %</span><input id="frac" type="range" min="10" max="80" value="40">
+  <button data-sp="0">⏸</button><button data-sp="1" class="on">1×</button><button data-sp="2">2×</button><button data-sp="4">4×</button>
+  <button id="auto">Zuschauen</button>
+  <div id="hint">Eigene Stadt antippen = ausbauen · Feindesland antippen = Panzerkeil losschicken</div>
+</div>
+<div id="over"><div><div id="overt"></div><div style="font-size:15px;margin-top:10px;font-weight:400">Tippen für neue Runde</div></div></div>
+<script>
+// Prototype only: a tiny stand-in simulation. The real game keeps its own deterministic simulation;
+// this page only shows how the 3D close-up could look and feel (see ../IDEE.md).
+(() => {
+'use strict';
+const W = 20, H = 12, TW = 32, TH = 16, MAXLV = 6;
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const $ = id => document.getElementById(id);
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const hash = (x, y, k = 0) => { const s = Math.sin(x * 127.1 + y * 311.7 + k * 74.7) * 43758.5453; return s - Math.floor(s); };
+const rr = (a, b) => a + Math.random() * (b - a);
+const idx = (x, y) => y * W + x;
+const proj = (x, y) => [(x - y) * TW, (x + y) * TH];
+
+// ---------- state ----------
+const SIDE = [
+  { name: 'Du',     col: '#4c8dff', dark: '#2a58ad', wl: '#a9c9ff', wr: '#7ea5db', roof: '#4c8dff' },
+  { name: 'Gegner', col: '#ff5a4a', dark: '#b13428', wl: '#e8b2aa', wr: '#c28880', roof: '#ff5a4a' },
+];
+let P, own, dig, flash, tree, plots, tanks, attacks, parts, craters, S, borderList;
+
+function reset() {
+  S = { t: 0, speed: 1, over: false, acc: 0, uid: 1 };
+  P = [0, 1].map(i => ({ gold: 120, troops: 80, nextAtk: rr(25, 35), nextThink: 1, auto: i === 1 || (P && P[0] && P[0].auto) || false, mult: i === 1 ? 0.95 : 1, spawn: 0, trim: 0 }));
+  P[0].auto = !!(window.__auto);
+  own = new Uint8Array(W * H); dig = new Float32Array(W * H).fill(0.5); flash = new Float32Array(W * H); tree = new Uint8Array(W * H);
+  const defs = [[2, 3, 2], [4, 7, 1], [3, 10, 1], [6, 2, 0], [7, 9, 0]];
+  plots = [];
+  for (const [x, y, l] of defs) { plots.push({ x, y, lv: l, disp: l, fire: 0 }); plots.push({ x: W - 1 - x, y: H - 1 - y, lv: l, disp: l, fire: 0 }); }
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    own[idx(x, y)] = x < W / 2 ? 0 : 1;
+    if (hash(x, y, 3) > 0.8 && !plots.some(p => Math.abs(p.x - x) < 1 && Math.abs(p.y - y) < 1)) tree[idx(x, y)] = 1;
+  }
+  tanks = []; attacks = []; parts = []; craters = []; borderList = [[], []];
+  for (let s = 0; s < 2; s++) for (let i = 0; i < 5; i++) spawnTank(s);
+  updateBorders();
+  $('over').style.display = 'none';
+}
+
+// ---------- economy ----------
+const lvSum = s => plots.reduce((a, p) => a + (own[idx(p.x, p.y)] === s ? p.lv : 0), 0);
+const income = s => (2 + 2.2 * lvSum(s)) * P[s].mult;
+const cap = s => 60 + 45 * lvSum(s);
+const tiles = s => { let n = 0; for (let i = 0; i < own.length; i++) if (own[i] === s) n++; return n; };
+const cost = p => 45 * (p.lv + 1) + (p.lv >= 3 ? 30 * p.lv : 0);
+
+function upgrade(p) {
+  const s = own[idx(p.x, p.y)]; if (p.lv >= MAXLV) return false;
+  const c = cost(p); if (P[s].gold < c) return false;
+  P[s].gold -= c; p.lv++; return true;
+}
+
+// ---------- helpers ----------
+function updateBorders() {
+  borderList = [[], []];
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const s = own[idx(x, y)];
+    if ((x > 0 && own[idx(x - 1, y)] !== s) || (x < W - 1 && own[idx(x + 1, y)] !== s) || (y > 0 && own[idx(x, y - 1)] !== s) || (y < H - 1 && own[idx(x, y + 1)] !== s)) borderList[s].push([x, y]);
+  }
+}
+function pickSpot(t) {
+  const b = borderList[t.side], dir = t.side ? -1 : 1;
+  if (b.length) { const [bx, by] = b[Math.floor(Math.random() * b.length)]; t.spot = [clamp(bx + 0.5 - dir * rr(0.9, 1.9), 0.4, W - 0.4), clamp(by + 0.5 + rr(-0.4, 0.4), 0.4, H - 0.4)]; }
+  else t.spot = [t.x, t.y];
+}
+function spawnTank(side, at) {
+  const mine = plots.filter(p => own[idx(p.x, p.y)] === side && p.lv > 0);
+  const o = at || (mine.length ? mine[Math.floor(Math.random() * mine.length)] : { x: side ? W - 3 : 2, y: H / 2 });
+  const t = { id: S ? S.uid++ : 0, side, x: o.x + 0.5, y: o.y + 0.5, hx: side ? -1 : 1, hy: 0, mode: 'idle', spot: null, atk: null, fire: 0, dust: 0, off: 0 };
+  tanks.push(t); return t;
+}
+function boom(x, y, big) {
+  for (let i = 0; i < (big ? 14 : 8); i++) parts.push({ k: 'fire', x: x + rr(-.2, .2), y: y + rr(-.2, .2), z: rr(0, 6), vz: rr(15, 40), vx: rr(-.5, .5), vy: rr(-.5, .5), life: rr(.3, .7), max: .7, r: rr(5, 10) });
+  for (let i = 0; i < 6; i++) parts.push({ k: 'smoke', x, y, z: 6, vz: rr(14, 26), vx: rr(-.25, .25), vy: rr(-.25, .25), life: rr(1.4, 2.6), max: 2.6, r: rr(6, 11) });
+  craters.push({ x, y, t: 0 });
+}
+function log(text, col) {
+  const d = document.createElement('div'); d.textContent = text; if (col) d.style.color = col; $('msg').appendChild(d);
+  setTimeout(() => d.style.opacity = 0, 2600); setTimeout(() => d.remove(), 3300);
+  while ($('msg').children.length > 3) $('msg').firstChild.remove();
+}
+
+// ---------- attacks ----------
+function candidates(side, y0, band) {
+  const out = [];
+  for (let y = Math.max(0, y0 - band); y <= Math.min(H - 1, y0 + band); y++) for (let x = 0; x < W; x++) {
+    const i = idx(x, y); if (own[i] === side) continue;
+    if ((x > 0 && own[i - 1] === side) || (x < W - 1 && own[i + 1] === side) || (y > 0 && own[i - W] === side) || (y < H - 1 && own[i + W] === side)) out.push([x, y]);
+  }
+  return out;
+}
+function entryOf(side, tx, ty) {
+  const dir = side ? 1 : -1; // step from the target back towards own land
+  for (let x = tx; x >= 0 && x < W; x += dir) if (own[idx(x, ty)] === side) return [x, ty];
+  return [side ? W - 1 : 0, ty];
+}
+function launch(side, tx, ty, frac) {
+  const p = P[side]; const commit = Math.floor(p.troops * frac);
+  if (commit < 10) { if (side === 0) log('Zu wenig Truppen für einen Angriff', '#ffd27a'); return false; }
+  let y0 = clamp(ty, 1, H - 2), found = null;
+  for (let d = 0; d < H && !found; d++) for (const yy of [y0 - d, y0 + d]) if (yy >= 1 && yy <= H - 2 && candidates(side, yy, 2).some(c => own[idx(c[0], c[1])] !== side)) { found = yy; break; }
+  if (found === null) return false; y0 = found;
+  if (attacks.some(a => a.side === side && Math.abs(a.y0 - y0) < 3)) { if (side === 0) log('Dort läuft schon ein Angriff', '#ffd27a'); return false; }
+  p.troops -= commit;
+  const dir = side ? -1 : 1, entry = entryOf(side, tx, y0);
+  const a = { side, y0, strength: commit, start: entry, front: [entry[0] + 0.5, y0 + 0.5], dir, timer: 0.5, tanks: [], tx, ty: y0 };
+  // take the closest idle tanks, add new ones from the nearest city if needed
+  const idle = tanks.filter(t => t.side === side && t.mode === 'idle').sort((u, v) => Math.hypot(u.x - entry[0], u.y - y0) - Math.hypot(v.x - entry[0], v.y - y0));
+  const n = clamp(Math.ceil(commit / 9), 2, 8);
+  for (let i = 0; i < n; i++) { const t = idle[i] || spawnTank(side); t.mode = 'atk'; t.atk = a; t.off = i; a.tanks.push(t); }
+  attacks.push(a);
+  if (side === 1) log('Angriff auf deine Reihe ' + (y0 + 1) + '!', '#ff8a7a');
+  return true;
+}
+function stepAttack(a) {
+  const side = a.side, enemy = 1 - side, E = P[enemy];
+  const cs = candidates(side, a.y0, 2);
+  if (!cs.length) return endAttack(a);
+  let best = null, bs = -1e9;
+  for (const [x, y] of cs) { const sc = x * a.dir * 0.6 - Math.abs(y - a.y0) * 1.0 + hash(x, y, 9) * 0.1; if (sc > bs) { bs = sc; best = [x, y]; } }
+  const i = idx(best[0], best[1]), dens = E.troops / Math.max(1, tiles(enemy));
+  const c = 3 + dens * 1.4 * (1 + 0.7 * dig[i]);
+  if (a.strength < c) return endAttack(a);
+  a.strength -= c; E.troops = Math.max(0, E.troops - c * 0.5);
+  own[i] = side; dig[i] = 0; flash[i] = 1; a.front = [best[0] + 0.5, best[1] + 0.5];
+  boom(best[0] + 0.5 + rr(-.2, .2), best[1] + 0.5 + rr(-.2, .2), false);
+  if (tree[i]) { tree[i] = 0; boom(best[0] + 0.5, best[1] + 0.5, false); }
+  for (const t of a.tanks.slice(0, 3)) t.fire = 0.14;
+  const pl = plots.find(p => p.x === best[0] && p.y === best[1]);
+  if (pl) { pl.lv = Math.max(1, Math.ceil(pl.lv / 2)); pl.fire = 4; boom(pl.x + 0.5, pl.y + 0.5, true); log((side ? 'Gegner erobert' : 'Du erobertest') + ' eine Stadt!', side ? '#ff8a7a' : '#9ff0a8'); }
+  // the nearest enemy tank near the hit may be lost
+  const near = tanks.filter(t => t.side === enemy && t.mode === 'idle').sort((u, v) => Math.hypot(u.x - best[0], u.y - best[1]) - Math.hypot(v.x - best[0], v.y - best[1]))[0];
+  if (near && Math.hypot(near.x - best[0], near.y - best[1]) < 3.2 && Math.random() < 0.3) { boom(near.x, near.y, true); tanks.splice(tanks.indexOf(near), 1); }
+  updateBorders();
+}
+function endAttack(a) {
+  P[a.side].troops += Math.max(0, a.strength);
+  for (const t of a.tanks) { t.mode = 'idle'; t.atk = null; t.spot = null; }
+  attacks.splice(attacks.indexOf(a), 1);
+}
+
+// ---------- AI (used for the opponent, and for the player in "Zuschauen") ----------
+function think(side) {
+  const p = P[side];
+  const mine = plots.filter(q => own[idx(q.x, q.y)] === side && q.lv < MAXLV).sort((a, b) => a.lv - b.lv);
+  if (mine.length && p.gold >= cost(mine[0]) && Math.random() < 0.8) upgrade(mine[0]);
+  if (S.t >= p.nextAtk && p.troops > 0.55 * cap(side) && !attacks.some(a => a.side === side)) {
+    p.nextAtk = S.t + rr(14, 24);
+    const en = [];
+    for (const [x, y] of borderList[1 - side]) { const w = dig[idx(x, y)] * 3 + Math.random() * 2; en.push([w, x, y]); }
+    en.sort((a, b) => a[0] - b[0]);
+    if (en.length) launch(side, en[0][1], en[0][2], 0.42);
+  }
+}
+
+// ---------- update ----------
+function update(dt) {
+  if (S.over) return;
+  S.t += dt;
+  for (let s = 0; s < 2; s++) {
+    const p = P[s]; p.gold += income(s) * dt;
+    const c = cap(s); p.troops += (1.2 + (c - p.troops) * 0.02) * dt * (p.troops > c ? -0.5 : 1);
+    p.troops = Math.max(0, p.troops);
+  }
+  for (let i = 0; i < dig.length; i++) { if (dig[i] < 1) dig[i] = Math.min(1, dig[i] + dt / 45); if (flash[i] > 0) flash[i] = Math.max(0, flash[i] - dt * 2); }
+  for (const a of attacks.slice()) { a.timer -= dt; if (a.timer <= 0) { a.timer = 0.42; stepAttack(a); } }
+  for (let s = 0; s < 2; s++) { P[s].nextThink -= dt; if (P[s].nextThink <= 0) { P[s].nextThink = 1.5; if (P[s].auto) think(s); } }
+  updateTanks(dt);
+  for (const p of plots) { p.disp += clamp(p.lv - p.disp, -1, 1) * Math.min(1, dt * 0.9); if (Math.abs(p.lv - p.disp) < 0.01) p.disp = p.lv; if (p.fire > 0) { p.fire -= dt; if (Math.random() < dt * 8) parts.push({ k: Math.random() < 0.5 ? 'fire' : 'smoke', x: p.x + 0.5 + rr(-.2, .2), y: p.y + 0.5 + rr(-.2, .2), z: 8 + p.disp * 8, vz: rr(14, 26), vx: 0, vy: 0, life: 1.2, max: 1.2, r: rr(4, 8) }); } }
+  for (const q of parts) { q.life -= dt; q.z += q.vz * dt; q.x += q.vx * dt; q.y += q.vy * dt; }
+  parts = parts.filter(q => q.life > 0);
+  for (const c of craters) c.t += dt; craters = craters.filter(c => c.t < 40);
+  const sh0 = tiles(0) / (W * H), sh1 = tiles(1) / (W * H);
+  if (sh0 >= 0.85 || sh1 >= 0.85 || lvSum(0) === 0 || lvSum(1) === 0) { S.over = true; $('overt').textContent = sh0 > sh1 ? 'Sieg' : 'Niederlage'; $('over').style.display = 'flex'; }
+}
+function updateTanks(dt) {
+  for (let s = 0; s < 2; s++) {
+    const p = P[s], atkStr = attacks.filter(a => a.side === s).reduce((q, a) => q + a.strength, 0);
+    const wantTotal = Math.min(20, Math.floor((p.troops + atkStr) / 8));
+    const have = tanks.filter(t => t.side === s);
+    const idle = have.filter(t => t.mode === 'idle');
+    const wantIdle = wantTotal - (have.length - idle.length);
+    p.spawn -= dt; p.trim -= dt;
+    if (idle.length < wantIdle && p.spawn <= 0) { p.spawn = 0.6; spawnTank(s); }
+    if (idle.length > wantIdle && p.trim <= 0) {
+      p.trim = 0.5;
+      const f = attacks.filter(a => a.side !== s).map(a => a.front)[0] || [s ? W : 0, H / 2];
+      idle.sort((u, v) => Math.hypot(u.x - f[0], u.y - f[1]) - Math.hypot(v.x - f[0], v.y - f[1]));
+      const gone = idle[0]; boom(gone.x, gone.y, true); tanks.splice(tanks.indexOf(gone), 1);
+    }
+  }
+  for (const t of tanks) {
+    let tx, ty, sp = 1.4;
+    if (t.mode === 'atk') {
+      const a = t.atk, n = Math.max(1, a.tanks.length);
+      tx = a.front[0] - a.dir * (0.9 + (t.off % 3) * 0.45); ty = a.front[1] + (t.off - (n - 1) / 2) * 0.42; sp = 2;
+    } else {
+      if (!t.spot || Math.random() < dt * 0.02) pickSpot(t);
+      [tx, ty] = t.spot;
+    }
+    const dx = tx - t.x, dy = ty - t.y, d = Math.hypot(dx, dy);
+    if (d > 0.06) {
+      const st = Math.min(d, sp * dt); t.x += dx / d * st; t.y += dy / d * st;
+      t.hx += (dx / d - t.hx) * Math.min(1, dt * 6); t.hy += (dy / d - t.hy) * Math.min(1, dt * 6);
+      t.dust -= dt; if (t.dust <= 0) { t.dust = 0.14; parts.push({ k: 'dust', x: t.x, y: t.y, z: 1, vz: 6, vx: 0, vy: 0, life: 0.7, max: 0.7, r: 4 }); }
+    } else if (t.mode === 'atk') { t.hx += (t.atk.dir - t.hx) * Math.min(1, dt * 4); t.hy += (0 - t.hy) * Math.min(1, dt * 4); }
+    else { const dir = t.side ? -1 : 1; t.hx += (dir - t.hx) * Math.min(1, dt * 2); t.hy -= t.hy * Math.min(1, dt * 2); }
+    const hl = Math.hypot(t.hx, t.hy) || 1; t.hx /= hl; t.hy /= hl;
+    if (t.fire > 0) { t.fire -= dt; if (t.fire > 0.1) { const [sx, sy] = proj(t.x + t.hx * 0.55, t.y + t.hy * 0.55); parts.push({ k: 'flash', x: t.x + t.hx * 0.55, y: t.y + t.hy * 0.55, z: 8, vz: 0, vx: 0, vy: 0, life: 0.1, max: 0.1, r: 8 }); } }
+  }
+}
+
+// ---------- drawing ----------
+let sc = 1, ox = 0, oy = 0, dpr = 1, hover = null;
+function resize() {
+  dpr = window.devicePixelRatio || 1; const w = innerWidth, h = innerHeight;
+  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  const mw = (W + H) * TW + 60, mh = (W + H) * TH + 110, topPad = w < 600 ? 170 : 120, botPad = w < 600 ? 120 : 90;
+  sc = Math.min(w / mw, (h - topPad - botPad) / mh);
+  ox = w / 2 - ((W - H) * TW / 2) * sc; oy = topPad + 80 * sc;
+}
+function poly(pts, fill, stroke) { ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]); ctx.closePath(); if (fill) { ctx.fillStyle = fill; ctx.fill(); } if (stroke) { ctx.strokeStyle = stroke; ctx.stroke(); } }
+function tilePts(x, y) { return [proj(x, y), proj(x + 1, y), proj(x + 1, y + 1), proj(x, y + 1)]; }
+function shade(hex, f) { const n = parseInt(hex.slice(1), 16); const c = k => clamp(Math.round(((n >> k) & 255) * f), 0, 255); return `rgb(${c(16)},${c(8)},${c(0)})`; }
+function box(cx, cy, s, h, cl, cr, ct) {
+  const dx = s * TW, dy = s * TH;
+  poly([[cx - dx, cy], [cx, cy + dy], [cx, cy + dy - h], [cx - dx, cy - h]], cl);
+  poly([[cx, cy + dy], [cx + dx, cy], [cx + dx, cy - h], [cx, cy + dy - h]], cr);
+  poly([[cx - dx, cy - h], [cx, cy + dy - h], [cx + dx, cy - h], [cx, cy - dy - h]], ct);
+}
+function windows(ax, ay, ux, uy, h, seed, lit) {
+  const cols = Math.max(1, Math.floor(Math.hypot(ux, uy) / 7)), rows = Math.floor((h - 4) / 6);
+  for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+    if (hash(i, j, seed) < 0.3) continue;
+    const f = (i + 0.5) / cols; ctx.fillStyle = hash(i, j, seed + 5) < lit ? 'rgba(255,226,140,.95)' : 'rgba(30,45,70,.55)';
+    ctx.fillRect(ax + ux * f - 1.2, ay + uy * f - 5 - j * 6 - 1.6, 2.4, 3.2);
+  }
+}
+function drawBuilding(p) {
+  const s = own[idx(p.x, p.y)], c = SIDE[s], [cx, cy] = proj(p.x + 0.5, p.y + 0.5), d = p.disp;
+  ctx.fillStyle = 'rgba(0,0,0,.22)'; ctx.beginPath(); ctx.ellipse(cx, cy + 3, 22 + d * 2, 10 + d, 0, 0, 7); ctx.fill();
+  if (d < 0.05) { // empty building site
+    box(cx, cy, 0.5, 2, shade(c.wl, 0.8), shade(c.wr, 0.8), '#8c7b5e');
+    ctx.strokeStyle = '#d8d0b8'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(cx - 10, cy - 1); ctx.lineTo(cx - 10, cy - 14); ctx.moveTo(cx + 10, cy - 1); ctx.lineTo(cx + 10, cy - 14); ctx.stroke();
+    poly([[cx - 10, cy - 14], [cx + 6, cy - 11], [cx - 10, cy - 8]], c.col); return;
+  }
+  const sat = [[-0.27, 0.12, 0.22], [0.26, -0.1, 0.2], [0.02, 0.3, 0.19], [-0.08, -0.28, 0.18]];
+  const items = [[0, 0, 0.3, 9 + d * 12, 0]];
+  sat.forEach((o, i) => { const g = clamp(d - (i + 0.6), 0, 1); if (g > 0) items.push([o[0], o[1], o[2], g * (6 + d * (4 + i * 2)), i + 1]); });
+  items.sort((a, b) => (a[0] + a[1]) - (b[0] + b[1]));
+  for (const [ox2, oy2, ss, h, k] of items) {
+    const bx = cx + (ox2 - oy2) * TW, by = cy + (ox2 + oy2) * TH + 4;
+    box(bx, by, ss, h, c.wl, c.wr, shade(c.roof, 1.05));
+    const dx = ss * TW, dy = ss * TH;
+    windows(bx - dx, by, dx, dy, h, 11 + k, 0.55); windows(bx, by + dy, dx, -dy, h, 23 + k, 0.4);
+    if (k === 0 && d >= 4.5) { ctx.strokeStyle = '#d6dde6'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(bx, by - h - dy); ctx.lineTo(bx, by - h - dy - 14); ctx.stroke(); }
+  }
+  const mainH = 9 + d * 12;
+  if (p.lv - d > 0.02) { // crane while the building grows
+    const tx = cx + 8, ty = cy + 4 - mainH - 8;
+    ctx.strokeStyle = '#f2c230'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(tx, ty + 8); ctx.lineTo(tx, ty - 14); ctx.lineTo(tx - 20, ty - 14); ctx.moveTo(tx, ty - 14); ctx.lineTo(tx + 8, ty - 14); ctx.stroke();
+    ctx.strokeStyle = '#ccc'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(tx - 17, ty - 14); ctx.lineTo(tx - 17, ty - 4 + Math.sin(S.t * 3) * 2); ctx.stroke();
+  }
+  // flag with owner colour
+  const fy = cy + 4 - mainH - 18; ctx.strokeStyle = '#ddd'; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.moveTo(cx - 14, cy + 2); ctx.lineTo(cx - 14, cy - 16); ctx.stroke(); poly([[cx - 14, cy - 16], [cx - 4, cy - 13], [cx - 14, cy - 10]], c.col);
+}
+function drawTree(x, y) {
+  const [cx, cy] = proj(x + 0.5 + (hash(x, y, 1) - 0.5) * 0.4, y + 0.5 + (hash(x, y, 2) - 0.5) * 0.4);
+  ctx.fillStyle = '#4b3a2a'; ctx.fillRect(cx - 1.5, cy - 4, 3, 6);
+  poly([[cx - 8, cy - 3], [cx + 8, cy - 3], [cx, cy - 18]], '#2f6b3a'); poly([[cx - 6, cy - 11], [cx + 6, cy - 11], [cx, cy - 24]], '#3b8147');
+}
+function drawTank(t) {
+  const c = SIDE[t.side], [cx, cy] = proj(t.x, t.y);
+  ctx.fillStyle = 'rgba(0,0,0,.28)'; ctx.beginPath(); ctx.ellipse(cx, cy + 2, 11, 5, 0, 0, 7); ctx.fill();
+  box(cx, cy, 0.3, 4, shade(c.dark, 0.8), shade(c.dark, 0.6), shade(c.dark, 1.05));        // tracks / hull
+  box(cx, cy - 3, 0.2, 4, shade(c.col, 0.85), shade(c.col, 0.65), shade(c.col, 1.1));         // turret
+  const bx = (t.hx - t.hy) * TW, by = (t.hx + t.hy) * TH, bl = Math.hypot(bx, by) || 1;       // barrel in screen direction
+  ctx.strokeStyle = '#1b222c'; ctx.lineWidth = 2.6; ctx.beginPath(); ctx.moveTo(cx, cy - 9); ctx.lineTo(cx + bx / bl * 15, cy - 9 + by / bl * 15); ctx.stroke();
+}
+function drawParts() {
+  for (const q of parts) {
+    const [sx, sy] = proj(q.x, q.y), a = clamp(q.life / q.max, 0, 1), y = sy - q.z;
+    if (q.k === 'smoke') { ctx.fillStyle = `rgba(60,62,66,${a * 0.5})`; ctx.beginPath(); ctx.arc(sx, y, q.r * (1.6 - a * 0.6), 0, 7); ctx.fill(); }
+    else if (q.k === 'fire') { ctx.fillStyle = `rgba(255,${Math.round(90 + 130 * a)},30,${a})`; ctx.beginPath(); ctx.arc(sx, y, q.r * (0.4 + a * 0.6), 0, 7); ctx.fill(); }
+    else if (q.k === 'dust') { ctx.fillStyle = `rgba(190,170,125,${a * 0.45})`; ctx.beginPath(); ctx.arc(sx, y, q.r * (1.5 - a * 0.5), 0, 7); ctx.fill(); }
+    else { ctx.fillStyle = `rgba(255,240,170,${a})`; ctx.beginPath(); ctx.arc(sx, y, q.r * (0.5 + a), 0, 7); ctx.fill(); }
+  }
+}
+function render() {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, cv.width, cv.height);
+  const g = ctx.createLinearGradient(0, 0, 0, innerHeight); g.addColorStop(0, '#16253a'); g.addColorStop(1, '#0b121b'); ctx.fillStyle = g; ctx.fillRect(0, 0, innerWidth, innerHeight);
+  ctx.setTransform(dpr * sc, 0, 0, dpr * sc, ox * dpr, oy * dpr); ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  // ground
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = idx(x, y), s = own[i], v = hash(x, y), pts = tilePts(x, y);
+    if (x === W - 1) poly([proj(x + 1, y), proj(x + 1, y + 1), [proj(x + 1, y + 1)[0], proj(x + 1, y + 1)[1] + 16], [proj(x + 1, y)[0], proj(x + 1, y)[1] + 16]], '#5a4630');
+    if (y === H - 1) poly([proj(x, y + 1), proj(x + 1, y + 1), [proj(x + 1, y + 1)[0], proj(x + 1, y + 1)[1] + 16], [proj(x, y + 1)[0], proj(x, y + 1)[1] + 16]], '#6e583c');
+    poly(pts, `hsl(${100 + v * 14},${34 + v * 8}%,${34 + v * 7}%)`);
+    poly(pts, s ? 'rgba(255,90,70,.13)' : 'rgba(80,140,255,.13)');
+    if (flash[i] > 0) poly(pts, `rgba(255,235,190,${flash[i] * 0.55})`);
+    const [cx, cy] = proj(x + 0.5, y + 0.5);
+    if (dig[i] > 0.6 && borderList[s].some(b => b[0] === x && b[1] === y)) { ctx.fillStyle = '#7a6a4c'; for (let k = -1; k <= 1; k++) { ctx.beginPath(); ctx.ellipse(cx + k * 7 + (s ? -6 : 6), cy + k * 3, 3.4, 1.8, 0, 0, 7); ctx.fill(); } }
+  }
+  for (const c of craters) { const [cx, cy] = proj(c.x, c.y), a = clamp(1 - c.t / 40, 0, 1) * 0.55; ctx.fillStyle = `rgba(20,16,10,${a})`; ctx.beginPath(); ctx.ellipse(cx, cy, 9, 4.5, 0, 0, 7); ctx.fill(); }
+  // borders in both owner colours
+  ctx.lineWidth = 3;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = idx(x, y), s = own[i]; ctx.strokeStyle = SIDE[s].col; ctx.beginPath();
+    if (x < W - 1 && own[i + 1] !== s) { const a = proj(x + 1, y), b = proj(x + 1, y + 1); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); }
+    if (x > 0 && own[i - 1] !== s) { const a = proj(x, y), b = proj(x, y + 1); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); }
+    if (y < H - 1 && own[i + W] !== s) { const a = proj(x, y + 1), b = proj(x + 1, y + 1); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); }
+    if (y > 0 && own[i - W] !== s) { const a = proj(x, y), b = proj(x + 1, y); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); }
+    ctx.stroke();
+  }
+  // attack arrows
+  for (const a of attacks) {
+    const c = SIDE[a.side].col, [x0, y0] = proj(a.start[0] + 0.5, a.start[1] + 0.5), [x1, y1] = proj(a.front[0], a.front[1]);
+    ctx.strokeStyle = c; ctx.globalAlpha = 0.9; ctx.lineWidth = 5; ctx.setLineDash([12, 9]); ctx.lineDashOffset = -S.t * 40;
+    ctx.beginPath(); ctx.moveTo(x0, y0 - 2); ctx.lineTo(x1, y1 - 2); ctx.stroke(); ctx.setLineDash([]);
+    const ang = Math.atan2(y1 - y0, x1 - x0); ctx.fillStyle = c; ctx.beginPath(); ctx.moveTo(x1 + Math.cos(ang) * 14, y1 - 2 + Math.sin(ang) * 14); ctx.lineTo(x1 + Math.cos(ang + 2.5) * 11, y1 - 2 + Math.sin(ang + 2.5) * 11); ctx.lineTo(x1 + Math.cos(ang - 2.5) * 11, y1 - 2 + Math.sin(ang - 2.5) * 11); ctx.fill(); ctx.globalAlpha = 1;
+  }
+  if (hover && own[idx(hover[0], hover[1])] === 1 && !P[0].auto) { poly(tilePts(hover[0], hover[1]), 'rgba(255,255,255,.14)', 'rgba(255,255,255,.7)'); }
+  // depth-sorted objects
+  const objs = [];
+  for (const p of plots) objs.push([p.x + p.y + 1, () => drawBuilding(p)]);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (tree[idx(x, y)]) objs.push([x + y + 1, () => drawTree(x, y)]);
+  for (const t of tanks) objs.push([t.x + t.y + 0.2, () => drawTank(t)]);
+  objs.sort((a, b) => a[0] - b[0]); for (const o of objs) o[1]();
+  drawParts();
+}
+
+// ---------- HUD ----------
+function hud() {
+  for (let s = 0; s < 2; s++) {
+    const c = SIDE[s], sh = tiles(s) / (W * H) * 100;
+    $('c' + s).innerHTML = `<div class="row"><b style="color:${c.col}">${c.name}${s === 0 && P[0].auto ? ' (Auto)' : ''}</b><span>Gebiet ${sh.toFixed(0)} %</span></div>` +
+      `<div class="row"><span>Gold ${Math.floor(P[s].gold)}</span><span>+${income(s).toFixed(1)}/s</span></div>` +
+      `<div class="row"><span>Truppen ${Math.floor(P[s].troops)} / ${cap(s)}</span><span>Stufen ${lvSum(s)}</span></div>` +
+      `<div class="bar"><i style="width:${sh}%;background:${c.col}"></i></div>`;
+  }
+  const a = income(0), b = income(1), diff = (a / b - 1) * 100;
+  $('tempo').innerHTML = `<b>Wachstumstempo: ${diff >= 0 ? 'du bist ' + diff.toFixed(0) + ' % schneller' : 'Gegner ist ' + (-diff).toFixed(0) + ' % schneller'}</b>` +
+    `<div class="split"><i style="width:${a / (a + b) * 100}%;background:${SIDE[0].col}"></i><i style="flex:1;background:${SIDE[1].col}"></i></div>`;
+}
+
+// ---------- input ----------
+function toTile(ev) {
+  const r = cv.getBoundingClientRect(), wx = ((ev.clientX - r.left) - ox) / sc, wy = ((ev.clientY - r.top) - oy) / sc;
+  const a = wx / TW, b = wy / TH, x = Math.floor((a + b) / 2), y = Math.floor((b - a) / 2);
+  return { wx, wy, x, y, ok: x >= 0 && y >= 0 && x < W && y < H };
+}
+cv.addEventListener('pointermove', ev => { const t = toTile(ev); hover = t.ok ? [t.x, t.y] : null; });
+cv.addEventListener('pointerdown', ev => {
+  if (S.over) return; const t = toTile(ev); if (!t.ok) return;
+  if (P[0].auto) return;
+  for (const p of plots) { // buildings are tall, so test against their screen position first
+    const [cx, cy] = proj(p.x + 0.5, p.y + 0.5);
+    if (own[idx(p.x, p.y)] === 0 && Math.hypot(t.wx - cx, t.wy - (cy - 8 - p.disp * 6)) < 34) {
+      if (p.lv >= MAXLV) log('Schon auf der höchsten Stufe', '#ffd27a'); else if (!upgrade(p)) log('Zu wenig Gold: ' + cost(p) + ' nötig', '#ffd27a');
+      return;
+    }
+  }
+  if (own[idx(t.x, t.y)] === 1) launch(0, t.x, t.y, +$('frac').value / 100);
+});
+$('frac').addEventListener('input', () => $('fv').textContent = $('frac').value);
+document.querySelectorAll('[data-sp]').forEach(b => b.addEventListener('click', () => { S.speed = +b.dataset.sp; document.querySelectorAll('[data-sp]').forEach(x => x.classList.toggle('on', x === b)); }));
+$('auto').addEventListener('click', () => { P[0].auto = !P[0].auto; $('auto').classList.toggle('on', P[0].auto); });
+$('over').addEventListener('click', () => { const a = P[0].auto, sp = S.speed; reset(); P[0].auto = a; S.speed = sp; });
+addEventListener('resize', resize);
+
+// ---------- loop ----------
+reset(); resize();
+if (window.__auto) { P[0].auto = true; $('auto').classList.add('on'); }
+let last = performance.now(), hudT = 0;
+function frame(now) {
+  const dt = Math.min(0.1, (now - last) / 1000); last = now;
+  if (S.speed > 0) { let rest = dt * S.speed; while (rest > 0) { const d = Math.min(0.05, rest); update(d); rest -= d; } }
+  hudT -= dt; if (hudT <= 0) { hudT = 0.2; hud(); }
+  render(); requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+window.__proto = { get S() { return S; }, get P() { return P; }, tiles, lvSum, update, launch, upgrade, get plots() { return plots; }, get tanks() { return tanks; }, get attacks() { return attacks; } };
+})();
+</script>
+</body>
+</html>
